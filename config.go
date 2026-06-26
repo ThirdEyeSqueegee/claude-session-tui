@@ -216,10 +216,10 @@ func mergeDefaults(c *Config) {
 	if c.UI.LeftWidthPct <= 0 {
 		c.UI.LeftWidthPct = d.UI.LeftWidthPct
 	}
-	// TabColor.Enabled is a plain bool defaulting true: a zero value here means
-	// either "unset" or an explicit "false", which we can't tell apart. Since
-	// the [tab_color] default is on, treat the whole-file-absent case via the
-	// missing-file path above; within a present file, respect the parsed value.
+	// Pointer-bool fields (Resume.Chdir, TabColor.Enabled, UI.Footer,
+	// UI.ConfirmDelete) are intentionally left as parsed: nil = unset (resolved
+	// to the default by boolOr at use), a non-nil pointer = the user's explicit
+	// true/false. Merging them here would erase that distinction.
 }
 
 // sortModeFromString maps a config string to a sortMode (default recency).

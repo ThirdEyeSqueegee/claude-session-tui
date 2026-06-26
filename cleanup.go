@@ -42,8 +42,13 @@ func deleteSession(s Session) error {
 		rm.remove(m)
 	}
 
-	// tasks are keyed by a truncated id: tasks/session-<id[:8]>
-	rm.remove(filepath.Join(root, "tasks", "session-"+shortID(s.ID)))
+	// tasks are keyed by a truncated id: tasks/session-<id[:8]>. The short id is
+	// only 32 bits, so two sessions can collide on it; removing the dir would
+	// then reap a still-live session's task state. Only remove it when no other
+	// live transcript shares the prefix.
+	if !otherLiveShares(root, s.ID) {
+		rm.remove(filepath.Join(root, "tasks", "session-"+shortID(s.ID)))
+	}
 
 	// session metadata files: sessions/<pid>.json, keyed by the UUID in each
 	// file's inner "sessionId" field rather than by its (pid) filename.
@@ -69,6 +74,21 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// otherLiveShares reports whether a live transcript other than id shares id's
+// 8-char short form. Guards the short-id-keyed delete (tasks/session-<id[:8]>)
+// against reaping state that a still-live, prefix-colliding session relies on.
+func otherLiveShares(root, id string) bool {
+	short := shortID(id)
+	paths, _ := filepath.Glob(filepath.Join(root, "projects", "*", "*.jsonl"))
+	for _, p := range paths {
+		other := strings.TrimSuffix(filepath.Base(p), ".jsonl")
+		if other != id && validID(other) && shortID(other) == short {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionJSONID reads the "sessionId" field from a sessions/<pid>.json file.

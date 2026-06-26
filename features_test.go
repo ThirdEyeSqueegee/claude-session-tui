@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,68 @@ func TestSpaceKeyMarks(t *testing.T) {
 	}
 	if m.cursor != cur {
 		t.Errorf("second space moved cursor to %d", m.cursor)
+	}
+}
+
+// TestCursorRowStaysVisible guards the list scroll math: with many single-row
+// groups in a short window, each interior group header costs renderList an
+// extra blank line. ensureVisible must budget for those, or the cursor row
+// scrolls under the fold and fitLines clips it out of the rendered list pane.
+func TestCursorRowStaysVisible(t *testing.T) {
+	base := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	var ss []Session
+	for i := range 12 {
+		title := "TITLE_" + strconv.Itoa(i)
+		ss = append(ss, Session{
+			ID:      "id" + strconv.Itoa(i),
+			Path:    "~/proj" + strconv.Itoa(i), // each its own group
+			Title:   title,
+			Msgs:    1,
+			Updated: base.Add(-time.Duration(i) * time.Hour),
+		})
+	}
+	for i := range ss {
+		ss[i].Haystack = ss[i].Title
+	}
+	m := loaded(ss)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 14})
+	m = tm.(model)
+	m.cursor = len(m.rows) - 1
+	m.snapCursorToSession(-1)
+	m.ensureVisible()
+	sel := m.selected()
+	if sel == nil {
+		t.Fatal("no selection")
+	}
+	// the selected title must appear in the LEFT list pane, not just the detail
+	// pane (which mirrors the title). Slice each line to its first pane column.
+	out := stripANSI(m.View().Content)
+	for line := range strings.SplitSeq(out, "\n") {
+		left := line
+		if _, rest, ok := strings.Cut(line, "│"); ok {
+			if col, _, ok := strings.Cut(rest, "│"); ok {
+				left = col
+			}
+		}
+		if strings.Contains(left, sel.Title) {
+			return // visible — good
+		}
+	}
+	t.Errorf("selected row %q clipped out of the list pane:\n%s", sel.Title, out)
+}
+
+// TestMarkedDeleteIgnoresFilter guards the delete-target/UI-count agreement: a
+// session marked then hidden by the filter is still counted by "N marked" and
+// the confirm prompt, so deleteTargets must include it too — else delete acts
+// on fewer sessions than the prompt claims.
+func TestMarkedDeleteIgnoresFilter(t *testing.T) {
+	m := loaded(sample())
+	m.marked["aaaaaaaa-1"] = true // ~/work/api
+	m.marked["dddddddd-4"] = true // ~/configs
+	m.filter.SetValue("nushell")  // hides aaaaaaaa-1
+	m.rebuild()
+	if got := len(m.deleteTargets()); got != len(m.marked) {
+		t.Errorf("deleteTargets = %d but len(marked) = %d — confirm prompt would lie", got, len(m.marked))
 	}
 }
 

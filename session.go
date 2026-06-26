@@ -69,17 +69,31 @@ func sanitize(s string) string {
 		return s
 	}
 	s = ansi.Strip(s)
-	if !strings.ContainsAny(s, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x1b\x7f") {
+	// Fast path: if no rune trips the strip predicate, the string is already
+	// clean. Sharing isStripped with the loop keeps the two in lockstep — a
+	// hand-listed byte set silently leaks any control byte left off the list
+	// (e.g. CR, which overwrites the current terminal line).
+	if strings.IndexFunc(s, isStripped) < 0 {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, c := range s {
-		if c == '\n' || c == '\t' || c >= 0x20 && c != 0x7f {
+		if !isStripped(c) {
 			b.WriteRune(c)
 		}
 	}
 	return b.String()
+}
+
+// isStripped reports whether sanitize drops a rune: any C0 control byte except
+// newline and tab, plus DEL. C1 (U+0080–U+009F) is kept as valid decoded
+// Unicode; callers wrap their own newlines/tabs, so those two stay.
+func isStripped(c rune) bool {
+	if c == '\n' || c == '\t' {
+		return false
+	}
+	return c < 0x20 || c == 0x7f
 }
 
 // jsonl record. Only the fields we read are declared; the rest are ignored.
@@ -206,7 +220,7 @@ func parseSession(jsonlPath string) (Session, bool) {
 			s.PathReal = r.Cwd
 		}
 		if r.GitBranch != "" {
-			s.Branch = clip(r.GitBranch)
+			s.Branch = clip(sanitize(r.GitBranch))
 		}
 		if r.Timestamp != "" {
 			lastTs = r.Timestamp
@@ -229,7 +243,7 @@ func parseSession(jsonlPath string) (Session, bool) {
 				continue
 			}
 			if r.Message.Model != "" {
-				s.Model = clip(r.Message.Model)
+				s.Model = clip(sanitize(r.Message.Model))
 			}
 			if txt := contentText(r.Message.Content); txt != "" {
 				s.LastMsg = clip(txt) // contentText already sanitized
@@ -257,7 +271,10 @@ func parseSession(jsonlPath string) (Session, bool) {
 	} else if t, err := time.Parse(time.RFC3339Nano, lastTs); err == nil {
 		s.Updated = t
 	}
-	s.Path = collapseHome(s.PathReal)
+	// Path is display-only (headers, detail, title) and feeds Haystack, so it
+	// must be sanitized — a cwd can legally hold ESC/control bytes. PathReal
+	// stays raw: it's the chdir target and the scope-match key.
+	s.Path = sanitize(collapseHome(s.PathReal))
 
 	switch {
 	case customTitle != "":

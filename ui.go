@@ -413,13 +413,31 @@ func (m *model) listHeight() int {
 	return max(m.height-chrome, 1)
 }
 
+// visualRows is how many terminal lines renderList emits for rows[from..to]
+// inclusive: one per row plus a blank separator before each group header that
+// isn't the first row in the window. ensureVisible budgets against this — a
+// plain (to-from+1) row count ignores the separators and lets the cursor row
+// scroll under the fold where fitLines then clips it.
+func (m *model) visualRows(from, to int) int {
+	n := 0
+	for i := from; i <= to && i < len(m.rows); i++ {
+		n++
+		if m.rows[i].kind == rowHeader && i > from {
+			n++
+		}
+	}
+	return n
+}
+
 func (m *model) ensureVisible() {
 	h := m.listHeight()
 	if m.cursor < m.top {
 		m.top = m.cursor
 	}
-	if m.cursor >= m.top+h {
-		m.top = m.cursor - h + 1
+	// Scroll down until the cursor row fits within h visual lines of the top,
+	// counting the blank line renderList emits before each interior header.
+	for m.top < m.cursor && m.visualRows(m.top, m.cursor) > h {
+		m.top++
 	}
 	if m.top < 0 {
 		m.top = 0

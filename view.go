@@ -128,13 +128,16 @@ func (m model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // deleteTargets is the set of sessions a delete would act on: the marked ones,
-// or the cursor row when nothing is marked.
+// or the cursor row when nothing is marked. The marked set is scanned over
+// m.all, not m.rows — a session marked then hidden by the filter is still a
+// target, so the confirm prompt and "N marked" badge can't disagree with what a
+// delete actually removes.
 func (m *model) deleteTargets() []*Session {
 	if len(m.marked) > 0 {
-		var out []*Session
-		for i := range m.rows {
-			if r := m.rows[i]; r.kind == rowSession && m.marked[r.session.ID] {
-				out = append(out, r.session)
+		out := make([]*Session, 0, len(m.marked))
+		for i := range m.all {
+			if m.marked[m.all[i].ID] {
+				out = append(out, &m.all[i])
 			}
 		}
 		return out
@@ -281,8 +284,19 @@ func (m model) viewLoading() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, card)
 }
 
+// minPaneWidth is the narrowest a bordered pane can be: 2 border cols + 2*padX
+// padding, with zero content. Below this the rounded box itself is wider than
+// the terminal, so we skip the border entirely.
+const minPaneWidth = 2 + 2*padX
+
 func (m model) viewMain() string {
 	bodyH := m.listHeight()
+	// Terminal too narrow for even one bordered pane: drop the border and emit
+	// a plain, width-clamped list so nothing renders wider than the terminal.
+	if m.width < minPaneWidth {
+		body := fitLines(m.renderList(m.width, bodyH), bodyH)
+		return m.frameBody(body)
+	}
 	// A pane's Width() is the OUTER width (border + padding + content). The
 	// content we render must be that minus the 2 border cols and 2*padX padding,
 	// or it wraps and breaks the layout.
@@ -457,6 +471,11 @@ func (m model) renderList(w, h int) string {
 		} else {
 			line = m.renderSessionRow(r.session, w, i == m.cursor)
 		}
+		// Clamp to the inner width: a composed row (header badge, or a session
+		// row whose titleW is floored at 4) can exceed w on a very narrow pane,
+		// and lipgloss would then soft-wrap it inside the fixed-Width pane,
+		// inflating the line count past bodyH and overflowing the terminal.
+		line = truncate(line, w)
 		b.WriteString(line)
 		if i < end-1 {
 			b.WriteByte('\n')

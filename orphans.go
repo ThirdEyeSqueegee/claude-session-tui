@@ -68,13 +68,21 @@ func findOrphans(root string) []string {
 	// session's UUID. Orphan when that parent id has no live transcript.
 	projDirs, _ := filepath.Glob(filepath.Join(root, "projects", "*"))
 	for _, pd := range projDirs {
+		// The glob also matches stray files (e.g. a macOS .DS_Store at the
+		// projects/ root); only encoded-cwd directories are project dirs.
+		if fi, err := os.Stat(pd); err != nil || !fi.IsDir() {
+			continue
+		}
 		for _, e := range dirEntries(pd) {
 			if e.IsDir() && validID(e.Name()) && !live[e.Name()] {
 				orphans = append(orphans, filepath.Join(pd, e.Name()))
 			}
 		}
-		// husk: a project dir holding no transcript at all.
-		if !hasTranscript(pd) {
+		// husk: a project dir holding no transcript and no live subagent dir.
+		// A live session's subagent dir can sit under a different encoded cwd
+		// than its own transcript, so a no-transcript dir is not necessarily
+		// dead — reaping it as a husk would take that live state with it.
+		if !hasTranscript(pd) && !hasLiveSubagentDir(pd, live) {
 			orphans = append(orphans, pd)
 		}
 	}
@@ -103,6 +111,19 @@ func findOrphans(root string) []string {
 func hasTranscript(projDir string) bool {
 	for _, e := range dirEntries(projDir) {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".jsonl" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLiveSubagentDir reports whether a project dir holds a subagent dir named
+// for a live session id. Such a dir keeps a live session's state even though
+// the parent transcript lives under a different encoded cwd, so the project
+// dir is not a husk and must not be reaped.
+func hasLiveSubagentDir(projDir string, live map[string]bool) bool {
+	for _, e := range dirEntries(projDir) {
+		if e.IsDir() && live[e.Name()] {
 			return true
 		}
 	}

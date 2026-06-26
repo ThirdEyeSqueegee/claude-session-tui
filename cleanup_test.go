@@ -105,7 +105,11 @@ func TestSanitizeStripsControlAndANSI(t *testing.T) {
 		"bell\x07here":            "bellhere", // BEL
 		"title\x1b]0;evil\x07end": "titleend", // OSC set-title
 		"keep\nnewline\tand tab":  "keep\nnewline\tand tab",
-		"世界":                      "世界", // wide runes survive
+		"世界":                      "世界",       // wide runes survive
+		"line\rover":              "lineover", // CR alone (no other control) — overwrites the terminal line
+		"a\x16b":                  "ab",       // SYN, in the 0x10–0x1a gap
+		"a\x1cb":                  "ab",       // FS, in the 0x1c–0x1f gap
+		"a\x1fb":                  "ab",       // US
 	}
 	for in, want := range cases {
 		if got := sanitize(in); got != want {
