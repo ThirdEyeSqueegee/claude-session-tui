@@ -1,0 +1,12 @@
+# built binaries
+/cst
+/claude-session-tui
+*.exe
+
+# go
+/vendor/
+*.test
+*.out
+
+# goreleaser
+/dist/

@@ -1,0 +1,55 @@
+# cst — Claude Session TUI config
+# Location (first match wins):  -config <path>  >  $CST_CONFIG  >
+# $XDG_CONFIG_HOME/cst/config.toml  >  ~/.config/cst/config.toml
+#
+# Every key is optional. A missing file = all defaults, never an error.
+# A bad value (bad hex, unknown sort) keeps the default and shows a
+# non-fatal "config ⚠" note in the title bar. Run `cst -print-config`
+# to dump the resolved effective config.
+
+# ── how a picked session is launched ────────────────────────────────────────
+[resume]
+# Binary to launch. Point this at a wrapper if you like.
+command = "claude"
+# Args passed BEFORE the resume flag + id. Empty by default, so cst runs a plain
+# `claude --resume <id>`. Add your own flags here, e.g.:
+#   args = ["--dangerously-skip-permissions"]
+args = []
+# Flag used to pass the session id.
+resume_flag = "--resume"
+# chdir into the session's project dir before launching (Claude resolves the
+# session against its cwd, so this is on by default).
+chdir = true
+
+# ── kitty tab tinting around a launched session ─────────────────────────────
+# No-op outside kitty. cst waits on the child so it can restore the tab on exit.
+[tab_color]
+enabled = true
+active = "#d97757"    # active tab background
+inactive = "#914f39"  # inactive tab background
+active_fg = "#000000" # active tab foreground
+# Derive a stable distinct tab hue per project (hash of the project path) so a
+# wall of concurrent kitty tabs is scannable. Overrides active/inactive.
+per_project = false
+
+# ── layout & display ────────────────────────────────────────────────────────
+[ui]
+sort = "recency"      # "recency" | "project" | "msgs"
+left_width_pct = 42   # left pane width, percent of terminal (clamped 20–80)
+default_scope = "all" # "all" | "cwd" — start scoped to the launch repo
+footer = true        # show the "made with ♥" credit line
+confirm_delete = true # require y/n before deleting (no undo — keep this on)
+
+# ── palette overrides (hex) ─────────────────────────────────────────────────
+# Any omitted key keeps the built-in warm-peach default.
+[theme]
+accent = "#d97757"      # primary accent (claude orange)
+peach = "#e8a87c"       # sparkles, detail labels
+pink = "#d98e9a"        # badges
+cream = "#ecd9c6"       # body text
+dim = "#8a7a70"         # secondary text
+header = "#c9a892"      # group headers
+selected = "#fff3e8"    # selected-row text
+selected_bg = "#43302a" # selected-row background
+danger = "#e0788a"      # danger / delete
+border = "#5a4a42"      # pane border

@@ -1,0 +1,42 @@
+# golangci-lint v2 config for "cst" (Bubble Tea TUI, Go 1.26).
+# Run by golangci/golangci-lint-action@v9 (golangci-lint v2.x) via `golangci-lint run`.
+#
+# The version key MUST be the quoted string "2" — a bare `version: 2` is a YAML
+# int and is rejected by golangci-lint v2.
+#
+# `golangci-lint run` runs LINTERS only; it does not run formatters and won't
+# fail on unformatted code. The gofmt gate in ci.yml is the real format check;
+# the `formatters:` block here only powers the separate `golangci-lint fmt`.
+version: "2"
+
+run:
+  tests: true
+  # CI fails on dirty/inconsistent module state rather than mutating it.
+  modules-download-mode: readonly
+
+linters:
+  # "standard" already enables errcheck, govet, ineffassign, staticcheck, unused
+  # — do not re-list those under enable:.
+  default: standard
+  enable:
+    - misspell # catches typos in comments / strings
+  settings:
+    misspell:
+      locale: US
+  exclusions:
+    # Skip code-generated files (strict Go convention).
+    generated: strict
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Tests legitimately ignore some errors.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  # gofmt/gofumpt/goimports are formatters in v2 (moved out of `linters`).
+  # Enabling gofmt here only affects `golangci-lint fmt`, not the lint action.
+  enable:
+    - gofmt

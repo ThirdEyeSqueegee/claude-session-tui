@@ -1,0 +1,6 @@
+{"type":"user","cwd":"/home/u/proj","gitBranch":"main","timestamp":"2026-06-01T10:00:00Z","message":{"content":"first question"}}
+{"type":"assistant","timestamp":"2026-06-01T10:00:05Z","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"first answer"}]}}
+{"type":"user","cwd":"/home/u/proj","gitBranch":"feature","timestamp":"2026-06-01T10:01:00Z","message":{"content":"second"}}
+{"type":"assistant","timestamp":"2026-06-01T10:01:05Z","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"last answer"}]}}
+{"type":"custom-title","customTitle":"My Custom Title"}
+{"type":"ai-title","aiTitle":"AI Generated"}

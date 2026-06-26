@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Top-level token is read-only; only the publishing job is granted write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a half-finished release (would leave a partial GitHub Release).
+  cancel-in-progress: false
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to create the GitHub Release and upload assets.
+      contents: write
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # GoReleaser needs full history + tags for changelog/version detection.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser # OSS distribution (not goreleaser-pro)
+          version: "~> v2" # latest v2.x; pin exact for full reproducibility
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

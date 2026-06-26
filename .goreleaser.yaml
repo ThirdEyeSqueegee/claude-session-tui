@@ -1,0 +1,59 @@
+# GoReleaser v2 config for "cst".
+# Binaries-only release: darwin+linux, amd64+arm64, CGO off, tar.gz archives,
+# sha256 checksums, conventional-commit changelog. Validate with `goreleaser check`.
+#
+# Top-level `version: 2` is a bare int on purpose — GoReleaser v2 wants the
+# integer 2, not the string "2".
+version: 2
+
+project_name: cst
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cst
+    main: . # main package is at the repo root
+    binary: cst
+    env:
+      - CGO_ENABLED=0 # static, no cgo
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath # reproducible / no local paths in binary
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    # main.go declares only `var version`, so we stamp only main.version.
+    # -s -w strips debug info.
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: cst
+    ids:
+      - cst # which builds to archive
+    formats:
+      - tar.gz
+    # amd64 -> x86_64; Os title-cased (Darwin/Linux).
+    name_template: '{{ .Binary }}_{{ .Version }}_{{ title .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}'
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  # version string for non-tag builds.
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # Use GitHub's auto-generated release notes (the API behind the "Generate
+  # release notes" button) instead of parsing commits ourselves.
+  use: github-native
+
+release:
+  draft: false
+  prerelease: auto # v*-rc / v*-beta tags are flagged as prereleases
