@@ -49,6 +49,8 @@ func main() {
 		configF  string
 		printCfg bool
 		showVer  bool
+		prune    bool
+		pruneApp bool
 	)
 	// Each flag has a long and a short name bound to the same variable.
 	flag.StringVar(&outFile, "output", "", "write chosen conversation_id to this file and exit (don't launch)")
@@ -61,12 +63,18 @@ func main() {
 	flag.BoolVar(&printCfg, "C", false, "shorthand for --print-config")
 	flag.BoolVar(&showVer, "version", false, "print version and exit")
 	flag.BoolVar(&showVer, "v", false, "shorthand for --version")
+	flag.BoolVar(&prune, "prune", false, "sweep orphaned session state under ~/.claude (dry run unless --apply)")
+	flag.BoolVar(&pruneApp, "apply", false, "with --prune, actually remove the orphans")
 	flag.Usage = usage
 	flag.Parse()
 
 	if showVer {
 		fmt.Println("cst", version)
 		return
+	}
+
+	if prune {
+		os.Exit(runPrune(pruneApp))
 	}
 
 	cfg, cfgErr := loadConfig(configF)
@@ -109,6 +117,38 @@ func main() {
 	os.Exit(launchClaude(chosen, cfg))
 }
 
+// runPrune performs the orphan sweep and prints a report. Dry run by default;
+// apply actually removes. Returns a process exit code. Mirrors `ccp` / `ccp -a`.
+func runPrune(apply bool) int {
+	res, err := sweepOrphans(apply)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "prune failed:", err)
+		return 1
+	}
+	if len(res.Orphans) == 0 {
+		fmt.Println("no orphans found")
+		return 0
+	}
+	verb := "would remove"
+	if apply {
+		verb = "removing"
+	}
+	fmt.Printf("%s %d orphan(s):\n", verb, len(res.Orphans))
+	for _, p := range res.Orphans {
+		fmt.Println("  " + collapseHome(p))
+	}
+	if !apply {
+		fmt.Println("\nrun `cst --prune --apply` to delete")
+		return 0
+	}
+	fmt.Printf("\nremoved %d orphan(s)\n", res.Removed)
+	if res.Err != nil {
+		fmt.Fprintln(os.Stderr, "some removals failed:", res.Err)
+		return 1
+	}
+	return 0
+}
+
 // launchClaude runs the configured resume command for the chosen session,
 // inheriting this terminal, and waits for it. It tints the kitty tab around the
 // session and restores it after. Returns the child's exit code (or a non-zero
@@ -136,7 +176,12 @@ func launchClaude(s *Session, cfg Config) int {
 	defer tabs.reset()
 
 	// Bridge the gap between the TUI closing and Claude drawing its own UI.
-	fmt.Fprintln(os.Stderr, "Loading session "+resumeLabel(s)+"…")
+	// Colored through a colorprofile writer so it auto-strips for pipes / NO_COLOR.
+	loading := styDetailDim.Render("Loading session ") +
+		styTitleBar.Render("“"+resumeLabel(s)+"”") +
+		styDetailDim.Render("…")
+	lw := colorprofile.NewWriter(os.Stderr, os.Environ())
+	fmt.Fprintln(lw, loading)
 
 	if err := cmd.Run(); err != nil {
 		// A non-zero child exit arrives here too; surface its code if we can.
@@ -176,6 +221,7 @@ func usage() {
 	row("-o, --output <file>", "write the chosen id to <file> and exit")
 	row("-c, --config <path>", "use a specific config TOML")
 	row("-C, --print-config", "print the resolved effective config and exit")
+	row("--prune", "sweep orphaned session state (dry run; add --apply to delete)")
 	row("-v, --version", "print the build version and exit")
 	row("-h, --help", "show this help")
 

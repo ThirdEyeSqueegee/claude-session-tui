@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,11 +42,73 @@ func deleteSession(s Session) error {
 		rm.remove(m)
 	}
 
+	// tasks are keyed by a truncated id: tasks/session-<id[:8]>
+	rm.remove(filepath.Join(root, "tasks", "session-"+shortID(s.ID)))
+
+	// session metadata files: sessions/<pid>.json, keyed by the UUID in each
+	// file's inner "sessionId" field rather than by its (pid) filename.
+	for _, p := range sessionJSONFilesFor(root, s.ID) {
+		rm.remove(p)
+	}
+
 	// loosely-keyed caches: entries named for the id
 	for _, sub := range []string{"paste-cache", "tasks", "todos"} {
 		removeMatchingDeep(rm, filepath.Join(root, sub), s.ID)
 	}
+
+	// once the transcript is gone, drop the enclosing projects/<encoded-cwd>
+	// dir if it's now empty so a deleted repo doesn't leave a husk behind.
+	removeIfEmptyDir(rm, filepath.Dir(s.JsonlPath))
 	return rm.err
+}
+
+// shortID is the first 8 chars of a UUID — the form Claude Code names some
+// satellite state with (e.g. tasks/session-<id[:8]>).
+func shortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// sessionJSONID reads the "sessionId" field from a sessions/<pid>.json file.
+// Returns "" if the file is unreadable or has no such field.
+func sessionJSONID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var rec struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(data, &rec) != nil {
+		return ""
+	}
+	return rec.SessionID
+}
+
+// sessionJSONFilesFor returns the sessions/*.json files whose inner sessionId
+// equals id. These files are named by pid (e.g. 5784.json), not by the
+// conversation id, so each must be read to find the match.
+func sessionJSONFilesFor(root, id string) []string {
+	matches, _ := filepath.Glob(filepath.Join(root, "sessions", "*.json"))
+	var out []string
+	for _, p := range matches {
+		if sessionJSONID(p) == id {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// removeIfEmptyDir removes dir only when it has no entries. Used to clean a
+// projects/<encoded-cwd> directory after its last transcript is deleted.
+func removeIfEmptyDir(rm *confinedRemover, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	rm.remove(dir)
 }
 
 // confinedRemover refuses to remove any path that doesn't resolve to something

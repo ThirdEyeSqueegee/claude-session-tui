@@ -111,6 +111,8 @@ waits for it, and restores your terminal afterward.
 | `-o`, `--output <file>` | Write the chosen id to `<file>` and exit     |
 | `-c`, `--config <path>` | Use a specific config file                   |
 | `-C`, `--print-config`  | Print the resolved effective config and exit |
+| `--prune`               | Sweep orphaned session state (dry run)       |
+| `--prune --apply`       | Actually remove the orphans                  |
 | `-v`, `--version`       | Print the build version                      |
 | `-h`, `--help`          | Show help                                    |
 
@@ -158,13 +160,33 @@ checkouts still match. Start scoped with `default_scope = "cwd"`.
 sessions behind a single `delete N chats forever?` confirm, or just the cursor
 row when nothing is marked.
 
-Deleting removes the transcript plus its satellite state (`session-env`,
-`file-history`, subagent project dirs, and `paste-cache` / `tasks` / `todos`
-entries keyed by the session id). Every id is validated as a UUID and every
-removed path is confirmed to live strictly under `~/.claude` before deletion, so
-a malformed id can never escape that tree. A row is dropped from the list only
-when its on-disk delete actually succeeds; failures stay marked and are reported
-in the help bar.
+Deleting removes the transcript plus its satellite state: `session-env`,
+`file-history`, subagent project dirs, the `tasks/session-<id>` dir, the
+`sessions/<pid>.json` metadata file (matched on its inner `sessionId`, not its
+pid filename), and `paste-cache` / `tasks` / `todos` entries keyed by the
+session id. When the transcript was the last one in its project directory, that
+now-empty `projects/<encoded-cwd>` directory is removed too. Every id is
+validated as a UUID and every removed path is confirmed to live strictly under
+`~/.claude` before deletion, so a malformed id can never escape that tree. A row
+is dropped from the list only when its on-disk delete actually succeeds;
+failures stay marked and are reported in the help bar.
+
+### Prune orphans
+
+Crashes, manual deletes, and moved transcripts can leave session state behind
+with no transcript backing it. `cst --prune` sweeps for it — the inverse of a
+normal delete: it walks `session-env`, `file-history`, subagent dirs,
+`tasks/session-<id>`, `sessions/*.json`, and empty `projects/<encoded-cwd>`
+husks, and flags everything whose id isn't in the live transcript set.
+
+```sh
+cst --prune          # dry run — list what would be removed
+cst --prune --apply  # actually remove it
+```
+
+It defaults to a dry run; nothing is touched until you add `--apply`. Every
+removal goes through the same `~/.claude`-confined path check as a normal
+delete.
 
 ### kitty tab coloring
 
