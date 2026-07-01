@@ -111,10 +111,14 @@ waits for it, and restores your terminal afterward.
 | `-o`, `--output <file>` | Write the chosen id to `<file>` and exit     |
 | `-c`, `--config <path>` | Use a specific config file                   |
 | `-C`, `--print-config`  | Print the resolved effective config and exit |
-| `--prune`               | Sweep orphaned session state (dry run)       |
-| `--prune --apply`       | Actually remove the orphans                  |
 | `-v`, `--version`       | Print the build version                      |
 | `-h`, `--help`          | Show help                                    |
+
+### Commands
+
+| Command          | Behavior                                             |
+| ---------------- | ---------------------------------------------------- |
+| `prune` (or `p`) | Sweep orphaned session state, asking before removing |
 
 `--print` / `--output` let a wrapper own the launch instead of `cst`. Exit code
 `130` means you quit without choosing.
@@ -174,19 +178,19 @@ failures stay marked and are reported in the help bar.
 ### Prune orphans
 
 Crashes, manual deletes, and moved transcripts can leave session state behind
-with no transcript backing it. `cst --prune` sweeps for it — the inverse of a
+with no transcript backing it. `cst prune` sweeps for it — the inverse of a
 normal delete: it walks `session-env`, `file-history`, subagent dirs,
 `tasks/session-<id>`, `sessions/*.json`, and empty `projects/<encoded-cwd>`
 husks, and flags everything whose id isn't in the live transcript set.
 
 ```sh
-cst --prune          # dry run — list what would be removed
-cst --prune --apply  # actually remove it
+cst prune   # list orphans, then ask y / N before removing
+cst p       # same, short alias
 ```
 
-It defaults to a dry run; nothing is touched until you add `--apply`. Every
-removal goes through the same `~/.claude`-confined path check as a normal
-delete.
+It lists everything it found first, then asks for confirmation; a bare enter or
+`n` removes nothing. Every removal goes through the same `~/.claude`-confined
+path check as a normal delete.
 
 ### kitty tab coloring
 

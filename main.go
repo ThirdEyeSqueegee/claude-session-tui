@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -43,14 +45,18 @@ var version = "dev"
 //	--output, -o <file>  write the chosen id to a file and exit (yazi --cwd-file trick)
 //	--print,  -p         print the chosen id to stdout and exit
 func main() {
+	// `prune` (alias `p`) is a subcommand, not a flag: sweep orphaned session
+	// state and exit before the TUI. It must be the first argument.
+	if len(os.Args) > 1 && (os.Args[1] == "prune" || os.Args[1] == "p") {
+		os.Exit(runPrune(os.Args[2:]))
+	}
+
 	var (
 		outFile  string
 		printID  bool
 		configF  string
 		printCfg bool
 		showVer  bool
-		prune    bool
-		pruneApp bool
 	)
 	// Each flag has a long and a short name bound to the same variable.
 	flag.StringVar(&outFile, "output", "", "write chosen conversation_id to this file and exit (don't launch)")
@@ -63,18 +69,12 @@ func main() {
 	flag.BoolVar(&printCfg, "C", false, "shorthand for --print-config")
 	flag.BoolVar(&showVer, "version", false, "print version and exit")
 	flag.BoolVar(&showVer, "v", false, "shorthand for --version")
-	flag.BoolVar(&prune, "prune", false, "sweep orphaned session state under ~/.claude (dry run unless --apply)")
-	flag.BoolVar(&pruneApp, "apply", false, "with --prune, actually remove the orphans")
 	flag.Usage = usage
 	flag.Parse()
 
 	if showVer {
 		fmt.Println("cst", version)
 		return
-	}
-
-	if prune {
-		os.Exit(runPrune(pruneApp))
 	}
 
 	cfg, cfgErr := loadConfig(configF)
@@ -117,36 +117,66 @@ func main() {
 	os.Exit(launchClaude(chosen, cfg))
 }
 
-// runPrune performs the orphan sweep and prints a report. Dry run by default;
-// apply actually removes. Returns a process exit code. Mirrors `ccp` / `ccp -a`.
-func runPrune(apply bool) int {
-	res, err := sweepOrphans(apply)
+// runPrune performs the orphan sweep behind an interactive confirm and prints a
+// themed report. It first scans (dry) and lists what it found, then asks before
+// removing anything. Returns a process exit code. Mirrors the `ccp` helper.
+// Output is themed like usage() — colors auto-strip for pipes / NO_COLOR.
+func runPrune(args []string) int {
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		usage()
+		return 0
+	}
+
+	w := colorprofile.NewWriter(os.Stdout, os.Environ())
+	title := styLogo.Render(logoMark) + " " + styTitleBar.Render("cst prune") +
+		styDetailDim.Render(" — sweep orphaned session state under ~/.claude")
+	fmt.Fprintf(w, "\n  %s\n", title)
+
+	res, err := sweepOrphans(false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "prune failed:", err)
 		return 1
 	}
 	if len(res.Orphans) == 0 {
-		fmt.Println("no orphans found")
+		fmt.Fprintf(w, "\n  %s\n\n", styDetailDim.Render("no orphans found — nothing to sweep"))
 		return 0
 	}
-	verb := "would remove"
-	if apply {
-		verb = "removing"
-	}
-	fmt.Printf("%s %d orphan(s):\n", verb, len(res.Orphans))
+
+	fmt.Fprintf(w, "\n  %s\n", styDetailLbl.Render(fmt.Sprintf("%d orphan(s)", len(res.Orphans))))
 	for _, p := range res.Orphans {
-		fmt.Println("  " + collapseHome(p))
+		fmt.Fprintf(w, "    %s %s\n", styDanger.Render("✗"), styDetailDim.Render(collapseHome(p)))
 	}
-	if !apply {
-		fmt.Println("\nrun `cst --prune --apply` to delete")
+
+	fmt.Fprintf(w, "\n  %s ", styDanger.Render(fmt.Sprintf("remove %d orphan(s)? y / N", len(res.Orphans))))
+	if !confirm(os.Stdin) {
+		fmt.Fprintf(w, "\n  %s\n\n", styDetailDim.Render("aborted — nothing removed"))
 		return 0
 	}
-	fmt.Printf("\nremoved %d orphan(s)\n", res.Removed)
+
+	res, err = sweepOrphans(true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "prune failed:", err)
+		return 1
+	}
+	fmt.Fprintf(w, "\n  %s\n\n", styCount.Render(fmt.Sprintf("removed %d orphan(s)", res.Removed)))
 	if res.Err != nil {
 		fmt.Fprintln(os.Stderr, "some removals failed:", res.Err)
 		return 1
 	}
 	return 0
+}
+
+// confirm reads one line and reports whether it's an affirmative (y / yes,
+// case-insensitive). Anything else — including a bare enter or EOF — is a no,
+// so the destructive path is never taken by default.
+func confirm(r io.Reader) bool {
+	line, _ := bufio.NewReader(r).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 // launchClaude runs the configured resume command for the chosen session,
@@ -215,13 +245,16 @@ func usage() {
 
 	section("usage")
 	fmt.Fprintf(&b, "    %s\n", styCount.Render("cst [flags]"))
+	fmt.Fprintf(&b, "    %s\n", styCount.Render("cst prune"))
+
+	section("commands")
+	row("p, prune", "sweep orphaned session state (asks before removing)")
 
 	section("flags")
 	row("-p, --print", "print the chosen session id to stdout and exit")
 	row("-o, --output <file>", "write the chosen id to <file> and exit")
 	row("-c, --config <path>", "use a specific config TOML")
 	row("-C, --print-config", "print the resolved effective config and exit")
-	row("--prune", "sweep orphaned session state (dry run; add --apply to delete)")
 	row("-v, --version", "print the build version and exit")
 	row("-h, --help", "show this help")
 
