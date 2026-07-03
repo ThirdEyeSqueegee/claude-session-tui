@@ -87,11 +87,22 @@ func findOrphans(root string) []string {
 		}
 	}
 
-	// tasks/session-<id[:8]>: keyed by the short id.
-	for _, e := range dirEntries(filepath.Join(root, "tasks")) {
+	// tasks/session-<id[:8]> and teams/session-<id[:8]>: keyed by the short id.
+	for _, sub := range []string{"tasks", "teams"} {
+		for _, e := range dirEntries(filepath.Join(root, sub)) {
+			name := e.Name()
+			if s, ok := cutPrefix(name, "session-"); ok && validShortID(s) && !liveShort[s] {
+				orphans = append(orphans, filepath.Join(root, sub, name))
+			}
+		}
+	}
+
+	// jobs/<id[:8]>: bare-short-id dirs. Skip non-id entries the dir also holds
+	// (jobs/.draft-<hex>, jobs/pins.json) by requiring a valid short id.
+	for _, e := range dirEntries(filepath.Join(root, "jobs")) {
 		name := e.Name()
-		if s, ok := cutPrefix(name, "session-"); ok && !liveShort[s] {
-			orphans = append(orphans, filepath.Join(root, "tasks", name))
+		if validShortID(name) && !liveShort[name] {
+			orphans = append(orphans, filepath.Join(root, "jobs", name))
 		}
 	}
 

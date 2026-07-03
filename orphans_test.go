@@ -44,12 +44,20 @@ func mkClaudeRoot(t *testing.T) string {
 	mkdir("session-env", live)
 	mkdir("file-history", live)
 	mkdir("tasks", "session-"+live[:8])
+	mkdir("jobs", live[:8])
+	mkdir("teams", "session-"+live[:8])
 	write(filepath.Join(root, "sessions", "5784.json"), `{"sessionId":"`+live+`"}`)
+
+	// non-id siblings in jobs/ — never id-keyed, must always survive
+	mkdir("jobs", ".draft-23c45257")
+	write(filepath.Join(root, "jobs", "pins.json"), "[]")
 
 	// orphaned satellites — no live transcript backs these
 	mkdir("session-env", orphan)
 	mkdir("file-history", orphan)
 	mkdir("tasks", "session-"+orphan[:8])
+	mkdir("jobs", orphan[:8])
+	mkdir("teams", "session-"+orphan[:8])
 	write(filepath.Join(root, "sessions", "13774.json"), `{"sessionId":"`+orphan+`"}`)
 	mkdir("projects", "-work-live", orphan) // orphan subagent dir under a live project
 	mkdir("projects", "-work-dead")         // husk: project dir with no transcript
@@ -73,6 +81,8 @@ func TestSweepFindsOrphansDryRun(t *testing.T) {
 		filepath.Join(root, "session-env", orphan):            true,
 		filepath.Join(root, "file-history", orphan):           true,
 		filepath.Join(root, "tasks", "session-"+orphan[:8]):   true,
+		filepath.Join(root, "jobs", orphan[:8]):               true,
+		filepath.Join(root, "teams", "session-"+orphan[:8]):   true,
 		filepath.Join(root, "sessions", "13774.json"):         true,
 		filepath.Join(root, "projects", "-work-live", orphan): true,
 		filepath.Join(root, "projects", "-work-dead"):         true,
@@ -115,6 +125,8 @@ func TestSweepApplyRemovesOnlyOrphans(t *testing.T) {
 		filepath.Join(root, "session-env", orphan),
 		filepath.Join(root, "file-history", orphan),
 		filepath.Join(root, "tasks", "session-"+orphan[:8]),
+		filepath.Join(root, "jobs", orphan[:8]),
+		filepath.Join(root, "teams", "session-"+orphan[:8]),
 		filepath.Join(root, "sessions", "13774.json"),
 		filepath.Join(root, "projects", "-work-dead"),
 	} {
@@ -122,11 +134,15 @@ func TestSweepApplyRemovesOnlyOrphans(t *testing.T) {
 			t.Errorf("orphan survived apply: %s", p)
 		}
 	}
-	// every live satellite survives
+	// every live satellite survives, plus jobs/ non-id siblings
 	for _, p := range []string{
 		filepath.Join(root, "session-env", live),
 		filepath.Join(root, "file-history", live),
 		filepath.Join(root, "tasks", "session-"+live[:8]),
+		filepath.Join(root, "jobs", live[:8]),
+		filepath.Join(root, "teams", "session-"+live[:8]),
+		filepath.Join(root, "jobs", ".draft-23c45257"),
+		filepath.Join(root, "jobs", "pins.json"),
 		filepath.Join(root, "sessions", "5784.json"),
 		filepath.Join(root, "projects", "-work-live", live+".jsonl"),
 	} {
@@ -160,6 +176,8 @@ func TestDeleteSessionRemovesSatellites(t *testing.T) {
 		filepath.Join(root, "session-env", live),
 		filepath.Join(root, "file-history", live),
 		filepath.Join(root, "tasks", "session-"+live[:8]),
+		filepath.Join(root, "jobs", live[:8]),
+		filepath.Join(root, "teams", "session-"+live[:8]),
 		filepath.Join(root, "sessions", "5784.json"),
 		projDir, // empty husk removed
 	} {

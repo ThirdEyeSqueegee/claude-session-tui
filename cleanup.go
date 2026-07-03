@@ -42,12 +42,15 @@ func deleteSession(s Session) error {
 		rm.remove(m)
 	}
 
-	// tasks are keyed by a truncated id: tasks/session-<id[:8]>. The short id is
-	// only 32 bits, so two sessions can collide on it; removing the dir would
-	// then reap a still-live session's task state. Only remove it when no other
-	// live transcript shares the prefix.
+	// short-id-keyed state: tasks/session-<id[:8]>, jobs/<id[:8]>, and
+	// teams/session-<id[:8]>. The short id is only 32 bits, so two sessions can
+	// collide on it; removing the dir would then reap a still-live session's
+	// state. Only remove them when no other live transcript shares the prefix.
 	if !otherLiveShares(root, s.ID) {
-		rm.remove(filepath.Join(root, "tasks", "session-"+shortID(s.ID)))
+		short := shortID(s.ID)
+		rm.remove(filepath.Join(root, "tasks", "session-"+short))
+		rm.remove(filepath.Join(root, "jobs", short))
+		rm.remove(filepath.Join(root, "teams", "session-"+short))
 	}
 
 	// session metadata files: sessions/<pid>.json, keyed by the UUID in each

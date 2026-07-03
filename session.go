@@ -29,6 +29,14 @@ var idRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 
 func validID(id string) bool { return idRe.MatchString(id) }
 
+// shortIDRe matches the 8-hex-char short id form Claude Code uses to key
+// tasks/session-<id[:8]>, jobs/<id[:8]>, and teams/session-<id[:8]>. It gates
+// orphan matching so non-id siblings (e.g. jobs/.draft-<hex>, jobs/pins.json)
+// are never treated as reapable short-id state.
+var shortIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
+
+func validShortID(id string) bool { return shortIDRe.MatchString(id) }
+
 // Session is one Claude Code conversation, parsed from a single jsonl file.
 type Session struct {
 	ID        string // conversation_id (jsonl basename, sans extension); always a valid UUID
