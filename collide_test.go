@@ -26,16 +26,25 @@ func TestDeleteShortIDCollision(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proj, b+".jsonl"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	taskDir := filepath.Join(root, "tasks", "session-"+a[:8])
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		t.Fatal(err)
+	// all three short-id-keyed dirs share a's (== b's) 8-char prefix
+	shared := map[string]string{
+		"tasks": filepath.Join(root, "tasks", "session-"+a[:8]),
+		"jobs":  filepath.Join(root, "jobs", a[:8]),
+		"teams": filepath.Join(root, "teams", "session-"+a[:8]),
+	}
+	for _, d := range shared {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s := Session{ID: a, JsonlPath: filepath.Join(proj, a+".jsonl")}
 	if err := deleteSession(s); err != nil {
 		t.Fatalf("deleteSession: %v", err)
 	}
-	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
-		t.Errorf("deleting %s reaped tasks dir shared with live %s", a, b)
+	for kind, d := range shared {
+		if _, err := os.Stat(d); os.IsNotExist(err) {
+			t.Errorf("deleting %s reaped %s dir shared with live %s", a, kind, b)
+		}
 	}
 }
 
@@ -53,15 +62,23 @@ func TestDeleteRemovesUncollidedTaskDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proj, a+".jsonl"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	taskDir := filepath.Join(root, "tasks", "session-"+a[:8])
-	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		t.Fatal(err)
+	dirs := map[string]string{
+		"tasks": filepath.Join(root, "tasks", "session-"+a[:8]),
+		"jobs":  filepath.Join(root, "jobs", a[:8]),
+		"teams": filepath.Join(root, "teams", "session-"+a[:8]),
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s := Session{ID: a, JsonlPath: filepath.Join(proj, a+".jsonl")}
 	if err := deleteSession(s); err != nil {
 		t.Fatalf("deleteSession: %v", err)
 	}
-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
-		t.Errorf("uncollided tasks dir not removed")
+	for kind, d := range dirs {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("uncollided %s dir not removed", kind)
+		}
 	}
 }
