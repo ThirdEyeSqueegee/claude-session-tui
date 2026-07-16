@@ -79,8 +79,9 @@ func writeHistoryLines(path string, lines [][]byte) error {
 	tmpName := tmp.Name()
 	w := bufio.NewWriter(tmp)
 	for _, line := range lines {
-		w.Write(line)
-		w.WriteByte('\n')
+		// bufio.Writer errors are sticky; the Flush below surfaces them.
+		_, _ = w.Write(line)
+		_ = w.WriteByte('\n')
 	}
 	if err := w.Flush(); err != nil {
 		tmp.Close()
