@@ -34,11 +34,17 @@ per_project = false
 
 # ── layout & display ────────────────────────────────────────────────────────
 [ui]
-sort = "recency"      # "recency" | "project" | "msgs"
+sort = "recency"      # "recency" | "project" | "msgs" | "size"
+group = "project"     # "project" | "date" | "branch" — how rows are bucketed
 left_width_pct = 42   # left pane width, percent of terminal (clamped 20–80)
 default_scope = "all" # "all" | "cwd" — start scoped to the launch repo
 footer = true        # show the "made with ♥" credit line
 confirm_delete = true # require y/n before deleting (no undo — keep this on)
+git_status = true     # flag sessions whose project dir / git branch is gone
+                      # (one `git` call per unique repo at load; set false to skip)
+watch = false         # reload the list when ~/.claude/projects changes on disk
+                      # (event-driven via fsnotify; falls back to polling)
+watch_interval_secs = 5 # poll interval for the watch fallback, in seconds
 
 # ── palette overrides (hex) ─────────────────────────────────────────────────
 # Any omitted key keeps the built-in warm-peach default.

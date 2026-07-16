@@ -2,8 +2,9 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
-	"github.com/charmbracelet/x/ansi"
+	"bytes"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,9 +12,18 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
+	"golang.org/x/sync/errgroup"
 )
+
+// json/v2 (via go-json-experiment) replaces stdlib encoding/json on the parse
+// hot path — faster decode with the same struct tags. The stdlib encoding/json/v2
+// is gated behind GOEXPERIMENT=jsonv2 in Go 1.26 and so won't compile under a
+// plain `go build`; this module is the same upstreamed code, importable today.
 
 // maxTextLen caps every jsonl-derived string we keep, in runes. The render and
 // filter paths must never see a multi-KB blob (a pasted minified file or URL as
@@ -52,6 +62,18 @@ type Session struct {
 	JsonlPath string
 	Haystack  string // precomputed lowercased Title+Path+FirstMsg for fuzzyMatch
 	Truncated bool   // a line exceeded the scanner buffer; data may be incomplete
+
+	Size int64 // transcript size on disk, bytes
+
+	// token usage, summed over every assistant turn's message.usage
+	InTok       int64 // input_tokens (uncached)
+	OutTok      int64 // output_tokens
+	CacheReadT  int64 // cache_read_input_tokens
+	CacheWriteT int64 // cache_creation_input_tokens
+
+	// git-awareness, filled by a post-load pass (see annotateGit)
+	PathGone   bool // the session's project dir no longer exists on disk
+	BranchGone bool // Branch is set but no longer exists in the repo
 }
 
 // clip bounds a string to maxTextLen runes (cheap byte fast-path first).
@@ -118,31 +140,55 @@ type record struct {
 }
 
 type messageField struct {
-	Model   string          `json:"model"`
-	Content json.RawMessage `json:"content"`
+	Model   string         `json:"model"`
+	Content jsontext.Value `json:"content"` // kept raw; decoded lazily in contentText
+	Usage   *usageField    `json:"usage"`
 }
+
+// usageField is the token accounting Claude Code records on each assistant
+// message. Only the fields we sum are declared.
+type usageField struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+}
+
+// textKey is the JSON object key contentText looks for inside a block array.
+// Assistant turns are frequently tool-only (tool_use / tool_result, often the
+// largest blocks); those carry no "text" key, so a raw line without this
+// substring provably yields no text and can skip the (expensive) array decode.
+var textKey = []byte(`"text"`)
 
 // contentText pulls plain text out of a message content field, which is either
 // a bare string (user) or a list of typed blocks (assistant / structured user).
 // All returned text is sanitized here — this is the single chokepoint every
 // jsonl-derived message body flows through (parse and transcript render alike),
 // so control bytes / ANSI escapes can never reach the terminal.
-func contentText(raw json.RawMessage) string {
+func contentText(raw jsontext.Value) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	if raw[0] == '"' {
 		var s string
-		if json.Unmarshal(raw, &s) == nil {
+		if jsonv2.Unmarshal(raw, &s) == nil {
 			return sanitize(s)
 		}
+		return ""
+	}
+	// Byte prefilter: contentText only ever extracts "text" blocks, so a block
+	// array with no `"text"` key anywhere decodes to no parts. Skip the decode
+	// (and its allocations) for those lines. A false positive — `"text"` sitting
+	// in some other block's data — just costs a decode that returns "", never a
+	// wrong result.
+	if !bytes.Contains(raw, textKey) {
 		return ""
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(raw, &blocks) != nil {
+	if jsonv2.Unmarshal(raw, &blocks) != nil {
 		return ""
 	}
 	var parts []string
@@ -210,6 +256,9 @@ func parseSession(jsonlPath string) (Session, bool) {
 		ID:        id,
 		JsonlPath: jsonlPath,
 	}
+	if fi, err := f.Stat(); err == nil {
+		s.Size = fi.Size()
+	}
 	var customTitle, aiTitle, lastTs string
 	var firstUserSet bool
 
@@ -221,7 +270,7 @@ func parseSession(jsonlPath string) (Session, bool) {
 			continue
 		}
 		var r record
-		if json.Unmarshal(line, &r) != nil {
+		if jsonv2.Unmarshal(line, &r) != nil {
 			continue
 		}
 		if r.Cwd != "" && s.PathReal == "" {
@@ -253,6 +302,12 @@ func parseSession(jsonlPath string) (Session, bool) {
 			if r.Message.Model != "" {
 				s.Model = clip(sanitize(r.Message.Model))
 			}
+			if u := r.Message.Usage; u != nil {
+				s.InTok += u.InputTokens
+				s.OutTok += u.OutputTokens
+				s.CacheReadT += u.CacheReadInputTokens
+				s.CacheWriteT += u.CacheCreationInputTokens
+			}
 			if txt := contentText(r.Message.Content); txt != "" {
 				s.LastMsg = clip(txt) // contentText already sanitized
 			}
@@ -280,9 +335,11 @@ func parseSession(jsonlPath string) (Session, bool) {
 		s.Updated = t
 	}
 	// Path is display-only (headers, detail, title) and feeds Haystack, so it
-	// must be sanitized — a cwd can legally hold ESC/control bytes. PathReal
-	// stays raw: it's the chdir target and the scope-match key.
-	s.Path = sanitize(collapseHome(s.PathReal))
+	// must be sanitized (a cwd can legally hold ESC/control bytes) and clipped —
+	// an uncapped cwd would slip a multi-MB blob into the per-keystroke filter
+	// scan, the stall maxTextLen exists to prevent. PathReal stays raw: it's the
+	// chdir target and the scope-match key.
+	s.Path = clip(sanitize(collapseHome(s.PathReal)))
 
 	switch {
 	case customTitle != "":
@@ -314,8 +371,10 @@ type LoadResult struct {
 	Truncated int // sessions whose transcript hit the scanner buffer cap
 }
 
-// loadSessions globs every project jsonl and parses them in parallel.
-func loadSessions() (LoadResult, error) {
+// loadSessions globs every project jsonl and parses them in parallel. When
+// gitStatus is set it then flags gone project dirs / branches (annotateGit),
+// which spawns git subprocesses (deduped per repo) off the UI thread.
+func loadSessions(gitStatus bool) (LoadResult, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return LoadResult{}, err
@@ -329,24 +388,21 @@ func loadSessions() (LoadResult, error) {
 	out := make([]Session, len(paths))
 	ok := make([]bool, len(paths))
 
-	workers := min(runtime.NumCPU(), 8)
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Go(func() {
-			for i := range jobs {
-				if s, good := parseSession(paths[i]); good {
-					out[i] = s
-					ok[i] = true
-				}
+	// Bounded parallelism: each task writes its own slice index, so there's no
+	// shared-state race and no error to propagate (parseSession reports failure
+	// via ok=false). SetLimit caps concurrency; Go blocks until a slot frees.
+	var g errgroup.Group
+	g.SetLimit(min(runtime.NumCPU(), 8))
+	for i := range paths {
+		g.Go(func() error {
+			if s, good := parseSession(paths[i]); good {
+				out[i] = s
+				ok[i] = true
 			}
+			return nil
 		})
 	}
-	for i := range paths {
-		jobs <- i
-	}
-	close(jobs)
-	wg.Wait()
+	_ = g.Wait() // never returns an error — tasks don't produce one
 
 	res := LoadResult{Sessions: make([]Session, 0, len(paths))}
 	for i, good := range ok {
@@ -359,10 +415,38 @@ func loadSessions() (LoadResult, error) {
 			res.Truncated++
 		}
 	}
+	if gitStatus {
+		annotateGit(res.Sessions)
+	}
 	sort.Slice(res.Sessions, func(i, j int) bool {
 		return res.Sessions[i].Updated.After(res.Sessions[j].Updated)
 	})
 	return res, nil
+}
+
+// projectsFingerprint is a cheap signal of whether ~/.claude/projects changed:
+// a hash over each transcript's path, size, and mtime. It reads no file bodies,
+// so the watch poll can call it every tick and trigger a full reload only when
+// the fingerprint moves. Returns "" if the projects dir can't be globbed.
+func projectsFingerprint() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	paths, err := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
+	if err != nil {
+		return ""
+	}
+	sort.Strings(paths) // glob order isn't guaranteed stable across calls
+	h := fnv.New64a()
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00%d\n", p, fi.Size(), fi.ModTime().UnixNano())
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // agoString renders a duration since t as a compact relative label. Fresh and

@@ -35,9 +35,10 @@
 
 ## Features
 
-- 🗂️ **Grouped by project** — every session under `~/.claude/projects`, organized by repo
+- 🗂️ **Grouped your way** — every session under `~/.claude/projects`, bucketed by project, date, or branch
 - 🔍 **Fuzzy filter** — match across title, path, and first message (space = AND)
-- 👀 **Live detail pane** — first/last message, branch, model, message count, relative age
+- 👀 **Live detail pane** — first/last message, branch, model, message count, transcript size, token usage + est. cost
+- 🔄 **Live reload** — the list follows `~/.claude/projects` as sessions come and go (fsnotify, off by default)
 - ⚡ **Instant resume** — `chdir`s into the project and relaunches Claude where you left off
 - 🎯 **Project scope** — one key to show only the current repo's sessions
 - 🧹 **Safe bulk delete** — multi-select, UUID-validated, path-confined to `~/.claude`
@@ -98,8 +99,10 @@ waits for it, and restores your terminal afterward.
 | `space`              | Mark / unmark a row for bulk delete         |
 | `A`                  | Clear all marks                             |
 | `.`                  | Toggle scope to the launch repo only        |
-| `s`                  | Cycle sort: recency → project → msgs        |
-| `p`                  | Preview the full transcript                 |
+| `s`                  | Cycle sort: recency → project → msgs → size |
+| `S`                  | Cycle grouping: project → date → branch     |
+| `y` / `Y`            | Copy session id / project path (OSC-52)     |
+| `p`                  | Preview the full transcript (`/` to search, `n`/`N` to step) |
 | `d`                  | Delete (marked rows, or the cursor row)     |
 | `q` / `esc`          | Quit                                        |
 
@@ -147,8 +150,11 @@ enabled = true
 per_project = true   # distinct kitty tab hue per repo
 
 [ui]
-sort = "recency"     # "recency" | "project" | "msgs"
+sort = "recency"      # "recency" | "project" | "msgs" | "size"
+group = "project"     # "project" | "date" | "branch"
 default_scope = "all" # "all" | "cwd"
+git_status = true     # flag sessions whose project dir / branch is gone
+watch = false         # live-reload the list when ~/.claude/projects changes
 ```
 
 ### Project scope
@@ -169,7 +175,9 @@ Deleting removes the transcript plus its satellite state: `session-env`,
 `jobs/<id>`, and `teams/session-<id>` dirs, the `sessions/<pid>.json` metadata
 file (matched on its inner `sessionId`, not its pid filename), and `paste-cache`
 / `tasks` / `todos` entries keyed by the session id. When the transcript was the last one in its project directory, that
-now-empty `projects/<encoded-cwd>` directory is removed too. Every id is
+now-empty `projects/<encoded-cwd>` directory is removed too. The session's
+prompt lines are also stripped from the shared `history.jsonl` (atomic
+temp-file + rename, so a crash can't truncate it). Every id is
 validated as a UUID and every removed path is confirmed to live strictly under
 `~/.claude` before deletion, so a malformed id can never escape that tree. A row
 is dropped from the list only when its on-disk delete actually succeeds;
@@ -182,7 +190,7 @@ with no transcript backing it. `cst prune` sweeps for it — the inverse of a
 normal delete: it walks `session-env`, `file-history`, subagent dirs,
 `tasks/session-<id>`, `jobs/<id>`, `teams/session-<id>`, `sessions/*.json`, and
 empty `projects/<encoded-cwd>` husks, and flags everything whose id isn't in the
-live transcript set.
+live transcript set — plus orphaned prompt lines in the shared `history.jsonl`.
 
 ```sh
 cst prune   # list orphans, then ask y / N before removing

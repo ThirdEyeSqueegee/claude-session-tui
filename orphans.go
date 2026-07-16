@@ -21,7 +21,11 @@ import (
 type SweepResult struct {
 	Orphans []string // paths identified as orphaned satellite state
 	Removed int      // paths actually removed (0 on a dry run)
-	Err     error    // first removal error, if any
+	// history.jsonl is a single shared file, not a per-session path, so it's
+	// tracked apart from Orphans: HistoryLines is the count of orphaned prompt
+	// lines (whose sessionId has no live transcript) found or stripped.
+	HistoryLines int
+	Err          error // first removal error, if any
 }
 
 // liveIDs returns the set of transcript ids (jsonl basenames) under
@@ -170,10 +174,18 @@ func sweepOrphans(apply bool) (SweepResult, error) {
 	root := filepath.Join(home, ".claude")
 	orphans := findOrphans(root)
 
-	res := SweepResult{Orphans: orphans}
+	// history.jsonl: count (dry) or strip (apply) prompt lines whose sessionId
+	// has no live transcript. Keep a line with no/unparseable sessionId — can't
+	// prove it's an orphan (mirrors the sessions/*.json policy).
+	live, _ := liveIDs(root)
+	keep := func(id string) bool { return id == "" || live[id] }
+	hist, herr := rewriteHistory(root, keep, apply)
+
+	res := SweepResult{Orphans: orphans, HistoryLines: hist}
 	if !apply {
 		return res, nil
 	}
+	res.Err = herr
 	rm := newConfinedRemover(root)
 	for _, p := range orphans {
 		rm.remove(p)
@@ -181,6 +193,8 @@ func sweepOrphans(apply bool) (SweepResult, error) {
 			res.Removed++
 		}
 	}
-	res.Err = rm.err
+	if rm.err != nil {
+		res.Err = rm.err // a path-removal error outranks a history rewrite error
+	}
 	return res, nil
 }

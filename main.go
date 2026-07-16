@@ -96,6 +96,12 @@ func main() {
 	}
 
 	fm, ok := final.(model)
+	// Release the fs watcher before we hand the terminal to claude — cst stays
+	// alive as claude's parent for the whole session, so a leaked watcher FD and
+	// its blocked read goroutine would linger that entire time.
+	if ok && fm.fsw != nil {
+		fm.fsw.Close()
+	}
 	if !ok || fm.chosen == nil {
 		// quit without choosing → exit 130 so any wrapper knows not to resume
 		os.Exit(130)
@@ -137,17 +143,23 @@ func runPrune(args []string) int {
 		fmt.Fprintln(os.Stderr, "prune failed:", err)
 		return 1
 	}
-	if len(res.Orphans) == 0 {
+	if len(res.Orphans) == 0 && res.HistoryLines == 0 {
 		fmt.Fprintf(w, "\n  %s\n\n", styDetailDim.Render("no orphans found — nothing to sweep"))
 		return 0
 	}
 
-	fmt.Fprintf(w, "\n  %s\n", styDetailLbl.Render(fmt.Sprintf("%d orphan(s)", len(res.Orphans))))
-	for _, p := range res.Orphans {
-		fmt.Fprintf(w, "    %s %s\n", styDanger.Render("✗"), styDetailDim.Render(collapseHome(p)))
+	if len(res.Orphans) > 0 {
+		fmt.Fprintf(w, "\n  %s\n", styDetailLbl.Render(fmt.Sprintf("%d orphan(s)", len(res.Orphans))))
+		for _, p := range res.Orphans {
+			fmt.Fprintf(w, "    %s %s\n", styDanger.Render("✗"), styDetailDim.Render(collapseHome(p)))
+		}
+	}
+	if res.HistoryLines > 0 {
+		fmt.Fprintf(w, "\n  %s\n", styDetailLbl.Render(fmt.Sprintf("%d orphaned history line(s)", res.HistoryLines)))
+		fmt.Fprintf(w, "    %s %s\n", styDanger.Render("✗"), styDetailDim.Render("~/.claude/"+historyFile))
 	}
 
-	fmt.Fprintf(w, "\n  %s ", styDanger.Render(fmt.Sprintf("remove %d orphan(s)? y / N", len(res.Orphans))))
+	fmt.Fprintf(w, "\n  %s ", styDanger.Render(promptSummary(res)))
 	if !confirm(os.Stdin) {
 		fmt.Fprintf(w, "\n  %s\n\n", styDetailDim.Render("aborted — nothing removed"))
 		return 0
@@ -158,12 +170,37 @@ func runPrune(args []string) int {
 		fmt.Fprintln(os.Stderr, "prune failed:", err)
 		return 1
 	}
-	fmt.Fprintf(w, "\n  %s\n\n", styCount.Render(fmt.Sprintf("removed %d orphan(s)", res.Removed)))
+	fmt.Fprintf(w, "\n  %s\n\n", styCount.Render(removedSummary(res)))
 	if res.Err != nil {
 		fmt.Fprintln(os.Stderr, "some removals failed:", res.Err)
 		return 1
 	}
 	return 0
+}
+
+// promptSummary is the confirm-line text: names orphan paths and orphaned
+// history lines together so the y/N covers everything the sweep will touch.
+func promptSummary(res SweepResult) string {
+	switch {
+	case len(res.Orphans) > 0 && res.HistoryLines > 0:
+		return fmt.Sprintf("remove %d orphan(s) + %d history line(s)? y / N", len(res.Orphans), res.HistoryLines)
+	case res.HistoryLines > 0:
+		return fmt.Sprintf("strip %d orphaned history line(s)? y / N", res.HistoryLines)
+	default:
+		return fmt.Sprintf("remove %d orphan(s)? y / N", len(res.Orphans))
+	}
+}
+
+// removedSummary is the post-apply report, mirroring promptSummary.
+func removedSummary(res SweepResult) string {
+	switch {
+	case res.Removed > 0 && res.HistoryLines > 0:
+		return fmt.Sprintf("removed %d orphan(s) + %d history line(s)", res.Removed, res.HistoryLines)
+	case res.HistoryLines > 0:
+		return fmt.Sprintf("stripped %d orphaned history line(s)", res.HistoryLines)
+	default:
+		return fmt.Sprintf("removed %d orphan(s)", res.Removed)
+	}
 }
 
 // confirm reads one line and reports whether it's an affirmative (y / yes,
@@ -262,8 +299,10 @@ func usage() {
 	row("↵", "resume the selected session")
 	row("j / k, ↑ / ↓", "move (skips group headers)")
 	row("/", "fuzzy filter")
-	row("s", "cycle sort: recency / project / msgs")
-	row("p", "preview the transcript")
+	row("s", "cycle sort: recency / project / msgs / size")
+	row("S", "cycle group: project / date / branch")
+	row("y / Y", "copy session id / project path to clipboard")
+	row("p", "preview the transcript (/ to search, n / N to step)")
 	row("d", "delete the session")
 	row("q / esc", "quit")
 

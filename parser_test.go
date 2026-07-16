@@ -90,6 +90,31 @@ func TestParseSessionFixtures(t *testing.T) {
 	})
 }
 
+// TestParseSessionUsageAndSize proves per-turn usage is summed across assistant
+// messages and the transcript's on-disk size is captured.
+func TestParseSessionUsageAndSize(t *testing.T) {
+	dir := t.TempDir()
+	id := "33333333-3333-3333-3333-333333333333"
+	p := filepath.Join(dir, id+".jsonl")
+	body := `{"type":"user","cwd":"/x","timestamp":"2026-01-01T00:00:00Z","message":{"content":"hi"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":50,"cache_creation_input_tokens":20}}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":200,"output_tokens":30,"cache_read_input_tokens":5,"cache_creation_input_tokens":0}}}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, ok := parseSession(p)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if s.InTok != 300 || s.OutTok != 40 || s.CacheReadT != 55 || s.CacheWriteT != 20 {
+		t.Errorf("usage sums = in%d out%d cr%d cw%d, want 300/40/55/20",
+			s.InTok, s.OutTok, s.CacheReadT, s.CacheWriteT)
+	}
+	if s.Size != int64(len(body)) {
+		t.Errorf("Size = %d, want %d (file length)", s.Size, len(body))
+	}
+}
+
 // TestParseSessionSanitizesBranchModel proves gitBranch and model flow through
 // sanitize like message bodies do — a branch or model carrying ANSI/control
 // bytes (git allows ESC in ref names) must not reach the detail pane raw, where

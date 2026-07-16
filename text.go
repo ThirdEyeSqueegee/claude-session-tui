@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"os"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	jsonv2 "github.com/go-json-experiment/json"
 )
 
 // truncate cuts s to a display width of w, appending an ellipsis when clipped.
@@ -82,7 +82,7 @@ func renderTranscript(jsonlPath string, w int) string {
 			continue
 		}
 		var r record
-		if json.Unmarshal(line, &r) != nil {
+		if jsonv2.Unmarshal(line, &r) != nil {
 			continue
 		}
 		switch r.Type {

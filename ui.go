@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/fsnotify/fsnotify"
 )
 
 // ── sort modes ───────────────────────────────────────────────────────────────
@@ -22,7 +23,11 @@ const (
 	sortRecency sortMode = iota
 	sortProject
 	sortMsgs
+	sortSize
 )
+
+// sortModeCount is the number of sort modes, for the cycle key.
+const sortModeCount = 4
 
 func (s sortMode) label() string {
 	switch s {
@@ -30,8 +35,32 @@ func (s sortMode) label() string {
 		return "project"
 	case sortMsgs:
 		return "msgs"
+	case sortSize:
+		return "size"
 	default:
 		return "recency"
+	}
+}
+
+// groupMode is how the flat row list is bucketed under headers.
+type groupMode int
+
+const (
+	groupProject groupMode = iota
+	groupDate
+	groupBranch
+)
+
+const groupModeCount = 3
+
+func (g groupMode) label() string {
+	switch g {
+	case groupDate:
+		return "date"
+	case groupBranch:
+		return "branch"
+	default:
+		return "project"
 	}
 }
 
@@ -149,6 +178,7 @@ type model struct {
 	cursor    int       // index into rows (always points at a rowSession)
 	top       int       // first visible row (scroll offset)
 	sort      sortMode
+	group     groupMode
 	filter    textinput.Model
 	mode      uiMode
 	vp        viewport.Model // transcript pager
@@ -161,13 +191,23 @@ type model struct {
 	skipped   int      // unreadable jsonl files (advisory)
 	truncated int      // sessions that hit the scanner buffer cap (advisory)
 	deleteErr error    // last failed delete, shown in the help bar
+	notice    string   // transient confirmation (e.g. "copied id"), shown in the help bar
 	chosen    *Session // session to resume; set on enter, drives quit (nil = quit without picking)
 
 	// config-derived UI knobs
-	leftPct       int      // left pane width percent
-	footer        bool     // show the made-with credit line
-	confirmDelete bool     // require y/n before deleting
+	leftPct       int  // left pane width percent
+	footer        bool // show the made-with credit line
+	confirmDelete bool // require y/n before deleting
+	gitStatus     bool // flag gone project dirs / branches
+	watch         bool // reload when ~/.claude/projects changes
+	watchInterval time.Duration
 	cfgWarnings   []string // non-fatal config warnings, shown in the title bar
+
+	// transcript pager in-view search (modeTranscript)
+	searching       bool   // search field is focused
+	searchQuery     string // last applied transcript search
+	searchInput     textinput.Model
+	transcriptLines []string // ANSI-stripped transcript lines, aligned to the viewport, for search
 
 	// project scope: when cwdScope is on, only sessions whose project dir
 	// matches cwd are shown. cwd is symlink-resolved at startup.
@@ -177,6 +217,14 @@ type model struct {
 	// multi-select: ids marked for bulk delete (keyed by conversation_id so
 	// filter/sort rebuilds never corrupt the set).
 	marked map[string]bool
+
+	// watch: fingerprint of projects/ at last load, to detect on-disk changes.
+	fingerprint string
+	// fsw is the fsnotify watcher when the event-driven path is active; nil when
+	// falling back to the time-based poll. fsReloadPending debounces a burst of
+	// events into a single reload.
+	fsw             *fsnotify.Watcher
+	fsReloadPending bool
 }
 
 // sessionsLoadedMsg is delivered when the background load finishes.
@@ -192,6 +240,10 @@ func initialModel(now time.Time, cfg Config, warnings []string, cwd string) mode
 	ti.Placeholder = "filter…"
 	ti.Prompt = "/ "
 
+	si := textinput.New()
+	si.Placeholder = "search transcript…"
+	si.Prompt = "/ "
+
 	// a spinning asterisk, echoing the Claude Code starburst mark
 	sp := spinner.New(spinner.WithSpinner(spinner.Spinner{
 		Frames: []string{"✶", "✸", "✺", "✸"},
@@ -206,7 +258,9 @@ func initialModel(now time.Time, cfg Config, warnings []string, cwd string) mode
 
 	return model{
 		sort:          sortModeFromString(cfg.UI.Sort),
+		group:         groupModeFromString(cfg.UI.Group),
 		filter:        ti,
+		searchInput:   si,
 		mode:          modeList,
 		spinner:       sp,
 		now:           now,
@@ -214,6 +268,9 @@ func initialModel(now time.Time, cfg Config, warnings []string, cwd string) mode
 		leftPct:       leftPct,
 		footer:        boolOr(cfg.UI.Footer, true),
 		confirmDelete: boolOr(cfg.UI.ConfirmDelete, true),
+		gitStatus:     boolOr(cfg.UI.GitStatus, true),
+		watch:         boolOr(cfg.UI.Watch, false),
+		watchInterval: time.Duration(cfg.UI.WatchIntervalSecs) * time.Second,
 		cfgWarnings:   warnings,
 		cwd:           resolveCwd(cwd),
 		cwdScope:      cfg.UI.DefaultScope == "cwd",
@@ -243,14 +300,31 @@ func resolveCwd(p string) string {
 }
 
 // loadCmd parses all sessions off the UI thread so a heavy ~/.claude/projects
-// doesn't stall on a blank terminal at startup.
-func loadCmd() tea.Msg {
-	res, err := loadSessions()
-	return sessionsLoadedMsg{res: res, err: err}
+// doesn't stall on a blank terminal at startup. gitStatus is threaded through so
+// a reload keeps the same annotation behavior as the initial load.
+func loadCmd(gitStatus bool) tea.Cmd {
+	return func() tea.Msg {
+		res, err := loadSessions(gitStatus)
+		return sessionsLoadedMsg{res: res, err: err}
+	}
+}
+
+// watchTickMsg fires on the watch poll interval (the fallback path); the
+// handler reloads if ~/.claude/projects changed since the last load.
+type watchTickMsg struct{}
+
+// watchCmd starts live reload when enabled: try the event-driven fsnotify path
+// first (startWatchCmd), which falls back to polling if a watcher can't be
+// built. Returns nil when watch is off.
+func (m model) watchCmd() tea.Cmd {
+	if !m.watch {
+		return nil
+	}
+	return startWatchCmd
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadCmd, m.spinner.Tick)
+	return tea.Batch(loadCmd(m.gitStatus), m.spinner.Tick, m.watchCmd())
 }
 
 // ── rebuild: filter + sort + group into rows ───────────────────────────────────
@@ -278,6 +352,10 @@ func (m *model) rebuild() {
 		sort.SliceStable(matched, func(i, j int) bool {
 			return matched[i].Msgs > matched[j].Msgs
 		})
+	case sortSize:
+		sort.SliceStable(matched, func(i, j int) bool {
+			return matched[i].Size > matched[j].Size
+		})
 	case sortProject:
 		sort.SliceStable(matched, func(i, j int) bool {
 			if matched[i].Path == matched[j].Path {
@@ -287,15 +365,17 @@ func (m *model) rebuild() {
 		})
 	}
 
-	// group by project path, preserving the order projects first appear in the
-	// sorted slice. For recency that orders groups by their newest session.
+	// group by the current group key, preserving the order each group first
+	// appears in the sorted slice. For recency that orders groups by their
+	// newest session.
 	order := []string{}
 	groups := map[string][]Session{}
 	for _, s := range matched {
-		if _, ok := groups[s.Path]; !ok {
-			order = append(order, s.Path)
+		key := m.groupKey(s)
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
 		}
-		groups[s.Path] = append(groups[s.Path], s)
+		groups[key] = append(groups[key], s)
 	}
 
 	rows := make([]row, 0, len(matched)+len(order))
@@ -318,6 +398,43 @@ func (m *model) rebuild() {
 	}
 	m.snapCursorToSession(+1)
 	m.ensureVisible()
+}
+
+// groupKey is the header a session is bucketed under, per the current group
+// mode. Project is the raw display path; date is a coarse recency bucket; branch
+// is the git branch (or a placeholder when the session has none).
+func (m *model) groupKey(s Session) string {
+	switch m.group {
+	case groupDate:
+		return dateBucket(s.Updated, m.now)
+	case groupBranch:
+		if s.Branch == "" {
+			return "(no branch)"
+		}
+		return s.Branch
+	default:
+		return s.Path
+	}
+}
+
+// dateBucket labels t by recency relative to now, coarser than agoString so
+// sessions collapse into a handful of readable headers.
+func dateBucket(t, now time.Time) string {
+	d := now.Sub(t)
+	switch {
+	case d < 24*time.Hour:
+		return "today"
+	case d < 48*time.Hour:
+		return "yesterday"
+	case d < 7*24*time.Hour:
+		return "this week"
+	case d < 30*24*time.Hour:
+		return "this month"
+	case d < 365*24*time.Hour:
+		return "this year"
+	default:
+		return "older"
+	}
 }
 
 // fuzzyMatch tests query tokens against the session's precomputed lowercased

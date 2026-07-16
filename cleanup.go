@@ -64,6 +64,13 @@ func deleteSession(s Session) error {
 		removeMatchingDeep(rm, filepath.Join(root, sub), s.ID)
 	}
 
+	// history.jsonl is one shared file, not a path: strip this session's prompt
+	// lines instead of removing anything. A rewrite failure is recorded but
+	// doesn't abort the (already-done) path removals above.
+	if _, herr := rewriteHistory(root, func(id string) bool { return id != s.ID }, true); herr != nil && rm.err == nil {
+		rm.err = herr
+	}
+
 	// once the transcript is gone, drop the enclosing projects/<encoded-cwd>
 	// dir if it's now empty so a deleted repo doesn't leave a husk behind.
 	removeIfEmptyDir(rm, filepath.Dir(s.JsonlPath))

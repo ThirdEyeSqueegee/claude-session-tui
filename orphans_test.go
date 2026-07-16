@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,7 +64,39 @@ func mkClaudeRoot(t *testing.T) string {
 	mkdir("projects", "-work-live", orphan) // orphan subagent dir under a live project
 	mkdir("projects", "-work-dead")         // husk: project dir with no transcript
 
+	// history.jsonl: one live line (kept), two orphan lines (stripped), one line
+	// with no sessionId (kept — can't prove it's an orphan).
+	write(filepath.Join(root, "history.jsonl"),
+		`{"display":"live","sessionId":"`+live+`"}`+"\n"+
+			`{"display":"orphan a","sessionId":"`+orphan+`"}`+"\n"+
+			`{"display":"orphan b","sessionId":"`+orphan+`"}`+"\n"+
+			`{"display":"no session id"}`+"\n")
+
 	return root
+}
+
+// historyIDs returns the sessionIds present in root's history.jsonl, one per
+// non-empty line, "" for a line with no/unparseable sessionId.
+func historyIDs(t *testing.T, root string) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "history.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("bad history line %q: %v", line, err)
+		}
+		ids = append(ids, rec.SessionID)
+	}
+	return ids
 }
 
 func exists(p string) bool { _, err := os.Lstat(p); return err == nil }
@@ -75,6 +109,13 @@ func TestSweepFindsOrphansDryRun(t *testing.T) {
 	}
 	if res.Removed != 0 {
 		t.Errorf("dry run removed %d, want 0", res.Removed)
+	}
+	if res.HistoryLines != 2 {
+		t.Errorf("dry run counted %d orphaned history lines, want 2", res.HistoryLines)
+	}
+	// dry run must not rewrite history
+	if got := historyIDs(t, root); len(got) != 4 {
+		t.Errorf("dry run rewrote history: %d lines remain, want 4", len(got))
 	}
 	const orphan = "99999999-9999-9999-9999-999999999999"
 	want := map[string]bool{
@@ -116,10 +157,17 @@ func TestSweepApplyRemovesOnlyOrphans(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("apply error: %v", res.Err)
 	}
+	if res.HistoryLines != 2 {
+		t.Errorf("apply stripped %d history lines, want 2", res.HistoryLines)
+	}
 	const (
 		live   = "11111111-1111-1111-1111-111111111111"
 		orphan = "99999999-9999-9999-9999-999999999999"
 	)
+	// history keeps the live line and the no-id line, drops both orphan lines.
+	if got := historyIDs(t, root); len(got) != 2 || got[0] != live || got[1] != "" {
+		t.Errorf("history after sweep = %v, want [%s ]", got, live)
+	}
 	// every orphan gone
 	for _, p := range []string{
 		filepath.Join(root, "session-env", orphan),
@@ -183,6 +231,13 @@ func TestDeleteSessionRemovesSatellites(t *testing.T) {
 	} {
 		if exists(p) {
 			t.Errorf("deleteSession left %s behind", p)
+		}
+	}
+	// the live session's history line is stripped; other sessions' lines and the
+	// no-id line survive (delete only targets s.ID).
+	for _, id := range historyIDs(t, root) {
+		if id == live {
+			t.Error("deleteSession left the session's history line behind")
 		}
 	}
 }

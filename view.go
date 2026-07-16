@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ── update ─────────────────────────────────────────────────────────────────---
@@ -23,7 +24,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.all = msg.res.Sessions
 		m.skipped = msg.res.Skipped
 		m.truncated = msg.res.Truncated
+		m.fingerprint = projectsFingerprint()
 		m.rebuild()
+		return m, nil
+
+	case watchTickMsg:
+		// Poll fallback: reload only when the fingerprint moved, so an idle watch
+		// is just a stat sweep, not a re-parse. Reschedule the poll regardless.
+		var cmd tea.Cmd
+		if !m.loading && projectsFingerprint() != m.fingerprint {
+			cmd = loadCmd(m.gitStatus)
+		}
+		return m, tea.Batch(cmd, m.pollCmd())
+
+	case watchStartedMsg:
+		if msg.err != nil || msg.w == nil {
+			// Couldn't build an fsnotify watcher — fall back to time-based polling.
+			return m, m.pollCmd()
+		}
+		m.fsw = msg.w
+		return m, waitFSEvent(m.fsw)
+
+	case fsEventMsg:
+		return m, m.onFSEvent(msg)
+
+	case fsReloadMsg:
+		// A debounced burst ended: reload if the fingerprint actually moved.
+		m.fsReloadPending = false
+		if !m.loading && projectsFingerprint() != m.fingerprint {
+			return m, loadCmd(m.gitStatus)
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -65,6 +95,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.deleteErr = nil // any key dismisses a stale delete-error notice
+	m.notice = ""     // and any stale copy/confirmation notice
 	switch msg.String() {
 	case "q", "ctrl+c", "esc":
 		return m, tea.Quit
@@ -90,11 +121,24 @@ func (m model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.snapCursorToSession(-1)
 		m.ensureVisible()
 	case "s":
-		m.sort = (m.sort + 1) % 3
+		m.sort = (m.sort + 1) % sortModeCount
+		m.rebuild()
+	case "S":
+		m.group = (m.group + 1) % groupModeCount
 		m.rebuild()
 	case "/":
 		m.mode = modeFilter
 		return m, m.filter.Focus()
+	case "y":
+		if s := m.selected(); s != nil {
+			m.notice = "copied id " + shortID(s.ID)
+			return m, tea.SetClipboard(s.ID)
+		}
+	case "Y":
+		if s := m.selected(); s != nil {
+			m.notice = "copied path " + s.Path
+			return m, tea.SetClipboard(s.PathReal)
+		}
 	case "p":
 		if s := m.selected(); s != nil {
 			m.openTranscript(s)
@@ -196,6 +240,25 @@ func (m model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateTranscript(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// While the search field is focused, keys feed the input; esc cancels, enter
+	// applies (jumping to the first match), q is a literal character.
+	if m.searching {
+		switch msg.String() {
+		case "esc":
+			m.searching = false
+			m.searchInput.Blur()
+			return m, nil
+		case "enter":
+			m.searching = false
+			m.searchInput.Blur()
+			m.searchQuery = strings.TrimSpace(m.searchInput.Value())
+			m.jumpToMatch(1)
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		return m, cmd
+	}
 	switch msg.String() {
 	case "q", "esc", "p":
 		m.mode = modeList
@@ -205,10 +268,43 @@ func (m model) updateTranscript(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.chosen = s
 			return m, tea.Quit
 		}
+	case "/":
+		m.searching = true
+		m.searchInput.SetValue("")
+		return m, m.searchInput.Focus()
+	case "n":
+		m.jumpToMatch(1)
+		return m, nil
+	case "N":
+		m.jumpToMatch(-1)
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
 	return m, cmd
+}
+
+// jumpToMatch scrolls the transcript viewport to the next (dir=+1) or previous
+// (dir=-1) line containing searchQuery, wrapping around, case-insensitively.
+// No-op when the query is empty or the transcript has no lines.
+func (m *model) jumpToMatch(dir int) {
+	if m.searchQuery == "" {
+		return
+	}
+	lines := m.transcriptLines
+	n := len(lines)
+	if n == 0 {
+		return
+	}
+	q := strings.ToLower(m.searchQuery)
+	start := m.vp.YOffset()
+	for i := 1; i <= n; i++ {
+		idx := ((start+dir*i)%n + n) % n // wrap in both directions
+		if strings.Contains(strings.ToLower(lines[idx]), q) {
+			m.vp.SetYOffset(idx)
+			return
+		}
+	}
 }
 
 func (m model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -241,11 +337,21 @@ func errPartialDelete(deleted, failed int) error {
 
 func (m *model) openTranscript(s *Session) {
 	m.mode = modeTranscript
+	m.searching = false
+	m.searchQuery = ""
+	m.searchInput.SetValue("")
 	m.vp.SetWidth(m.width - 2)
 	m.vp.SetHeight(m.height - 4)
-	m.vp.SetContent(renderTranscript(s.JsonlPath, m.width-4))
+	content := renderTranscript(s.JsonlPath, m.width-4)
+	m.vp.SetContent(content)
+	// keep an ANSI-stripped, per-line copy aligned to the viewport for search
+	m.transcriptLines = strings.Split(stripANSILines(content), "\n")
 	m.vp.GotoTop()
 }
+
+// stripANSILines removes ANSI escapes from s so a per-line index matches the
+// viewport's own line splitting (the viewport wraps on the same width).
+func stripANSILines(s string) string { return ansi.Strip(s) }
 
 // ── view ────────────────────────────────────────────────────────────────────--
 
@@ -368,7 +474,7 @@ func (m model) titleBar() string {
 	if m.mode == modeFilter || m.filter.Value() != "" {
 		left += "  " + m.filter.View()
 	}
-	status := strconv.Itoa(len(m.all)) + " sessions · sort:" + m.sort.label()
+	status := strconv.Itoa(len(m.all)) + " sessions · sort:" + m.sort.label() + " · group:" + m.group.label()
 	if m.cwdScope {
 		status += " · scope:" + scopeName(m.cwd)
 	}
@@ -400,6 +506,9 @@ func (m model) helpBar() string {
 	if m.deleteErr != nil && m.mode == modeList {
 		return styHelp.Render(truncate(" delete failed: "+m.deleteErr.Error(), m.width))
 	}
+	if m.notice != "" && m.mode == modeList {
+		return styHelp.Render(truncate(" "+m.notice, m.width))
+	}
 	if m.mode == modeConfirmDelete {
 		n := len(m.deleteTargets())
 		prompt := " delete this chat forever? y / n"
@@ -418,9 +527,9 @@ func (m model) helpBar() string {
 		if len(m.marked) > 0 {
 			del = "d delete " + strconv.Itoa(len(m.marked)) + " · A unmark"
 		}
-		keys = "↵ resume · / filter · space mark · " + del + " · . scope · s sort · p preview · q quit"
+		keys = "↵ resume · / filter · space mark · " + del + " · . scope · s sort · S group · y copy · p preview · q quit"
 		if m.width > 0 && displayWidth(" "+keys) > m.width {
-			keys = "↵ resume · / filter · space mark · " + del + " · . scope · q quit"
+			keys = "↵ resume · / filter · space mark · " + del + " · . scope · s sort · S group · q quit"
 		}
 		if m.width > 0 && displayWidth(" "+keys) > m.width {
 			keys = "↵ resume · / filter · " + del + " · q quit"
@@ -526,15 +635,27 @@ func (m model) renderDetail(w int) string {
 	b.WriteString(styDetailDim.Render(strings.Repeat("─", min(w, 40))))
 	b.WriteString("\n\n")
 
-	fmt.Fprintf(&b, "%s   %s\n", styDetailLbl.Render("path"), truncate(s.Path, w-7))
-	line2 := strconv.Itoa(s.Msgs) + " msgs · " + agoString(s.Updated, m.now)
+	pathLine := truncate(s.Path, w-7)
+	if s.PathGone {
+		pathLine = truncate(s.Path+" (gone)", w-7)
+	}
+	fmt.Fprintf(&b, "%s   %s\n", styDetailLbl.Render("path"), pathLine)
+	line2 := strconv.Itoa(s.Msgs) + " msgs · " + humanSize(s.Size) + " · " + agoString(s.Updated, m.now)
 	if s.Branch != "" {
-		line2 += " · " + s.Branch
+		branch := s.Branch
+		if s.BranchGone {
+			branch += " (gone)"
+		}
+		line2 += " · " + branch
 	}
 	if s.Model != "" {
 		line2 += " · " + shortModel(s.Model)
 	}
-	fmt.Fprintf(&b, "%s\n\n", styDetailDim.Render(truncate(line2, w)))
+	fmt.Fprintf(&b, "%s\n", styDetailDim.Render(truncate(line2, w)))
+	if tok := tokenLine(*s); tok != "" {
+		fmt.Fprintf(&b, "%s\n", styDetailDim.Render(truncate(tok, w)))
+	}
+	b.WriteString("\n")
 
 	fmt.Fprintf(&b, "%s\n\n", styDetailLbl.Render("✎ first"))
 	fmt.Fprintf(&b, "%s\n\n", wrapClip(s.FirstMsg, w, 4))
@@ -559,7 +680,20 @@ func (m model) viewTranscript() string {
 		title = firstLine(s.Title)
 	}
 	bar := styLogo.Render(" "+logoMark+" ") + styTitleBar.Render(truncate(title, m.width-3))
-	help := styHelp.Render(" ↑/↓ scroll · ↵ resume this · q/esc back")
+	if m.searching {
+		bar += "  " + m.searchInput.View()
+	} else if m.searchQuery != "" {
+		bar += styDetailDim.Render("  /" + m.searchQuery)
+	}
+	var help string
+	switch {
+	case m.searching:
+		help = styHelp.Render(" type to search · ↵ jump · esc cancel")
+	case m.searchQuery != "":
+		help = styHelp.Render(" ↑/↓ scroll · / search · n/N next/prev · ↵ resume · q back")
+	default:
+		help = styHelp.Render(" ↑/↓ scroll · / search · ↵ resume this · q/esc back")
+	}
 	return strings.Join([]string{bar, m.vp.View(), help}, "\n")
 }
 

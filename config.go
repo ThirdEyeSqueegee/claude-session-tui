@@ -37,9 +37,14 @@ func validateConfig(c Config) []string {
 	checkHex("tab_color.inactive", c.TabColor.Inactive)
 	checkHex("tab_color.active_fg", c.TabColor.ActiveFg)
 	switch c.UI.Sort {
-	case "", "recency", "project", "msgs":
+	case "", "recency", "project", "msgs", "size":
 	default:
 		warns = append(warns, "unknown ui.sort="+c.UI.Sort+" (using recency)")
+	}
+	switch c.UI.Group {
+	case "", "project", "date", "branch":
+	default:
+		warns = append(warns, "unknown ui.group="+c.UI.Group+" (using project)")
 	}
 	switch c.UI.DefaultScope {
 	case "", "all", "cwd":
@@ -91,8 +96,10 @@ type TabColorConfig struct {
 }
 
 type UIConfig struct {
-	// Sort is the initial sort: "recency", "project", or "msgs".
+	// Sort is the initial sort: "recency", "project", "msgs", or "size".
 	Sort string `toml:"sort"`
+	// Group is how rows are grouped: "project" (default), "date", or "branch".
+	Group string `toml:"group"`
 	// LeftWidthPct is the left pane width as a percent of the terminal (default 42).
 	LeftWidthPct int `toml:"left_width_pct"`
 	// Footer shows the "made with ♥" credit line (default true).
@@ -101,6 +108,14 @@ type UIConfig struct {
 	ConfirmDelete *bool `toml:"confirm_delete"`
 	// DefaultScope is the initial project scope: "all" or "cwd" (default "all").
 	DefaultScope string `toml:"default_scope"`
+	// GitStatus flags sessions whose project dir or git branch is gone (default
+	// true). Costs one `git` call per unique repo at load; set false to skip.
+	GitStatus *bool `toml:"git_status"`
+	// Watch reloads the session list when ~/.claude/projects changes on disk
+	// (default false). Polls at WatchIntervalSecs.
+	Watch *bool `toml:"watch"`
+	// WatchIntervalSecs is the poll interval for Watch, in seconds (default 5).
+	WatchIntervalSecs int `toml:"watch_interval_secs"`
 }
 
 type ThemeConfig struct {
@@ -135,11 +150,15 @@ func defaultConfig() Config {
 			ActiveFg: "#000000",
 		},
 		UI: UIConfig{
-			Sort:          "recency",
-			LeftWidthPct:  42,
-			Footer:        &t,
-			ConfirmDelete: &t,
-			DefaultScope:  "all",
+			Sort:              "recency",
+			Group:             "project",
+			LeftWidthPct:      42,
+			Footer:            &t,
+			ConfirmDelete:     &t,
+			DefaultScope:      "all",
+			GitStatus:         &t,
+			Watch:             new(bool), // default false
+			WatchIntervalSecs: 5,
 		},
 	}
 }
@@ -212,9 +231,13 @@ func mergeDefaults(c *Config) {
 	or(&c.TabColor.Inactive, d.TabColor.Inactive)
 	or(&c.TabColor.ActiveFg, d.TabColor.ActiveFg)
 	or(&c.UI.Sort, d.UI.Sort)
+	or(&c.UI.Group, d.UI.Group)
 	or(&c.UI.DefaultScope, d.UI.DefaultScope)
 	if c.UI.LeftWidthPct <= 0 {
 		c.UI.LeftWidthPct = d.UI.LeftWidthPct
+	}
+	if c.UI.WatchIntervalSecs <= 0 {
+		c.UI.WatchIntervalSecs = d.UI.WatchIntervalSecs
 	}
 	// Pointer-bool fields (Resume.Chdir, TabColor.Enabled, UI.Footer,
 	// UI.ConfirmDelete) are intentionally left as parsed: nil = unset (resolved
@@ -229,8 +252,22 @@ func sortModeFromString(s string) sortMode {
 		return sortProject
 	case "msgs":
 		return sortMsgs
+	case "size":
+		return sortSize
 	default:
 		return sortRecency
+	}
+}
+
+// groupModeFromString maps a config string to a groupMode (default project).
+func groupModeFromString(s string) groupMode {
+	switch s {
+	case "date":
+		return groupDate
+	case "branch":
+		return groupBranch
+	default:
+		return groupProject
 	}
 }
 
