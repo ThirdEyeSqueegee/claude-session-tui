@@ -12,7 +12,7 @@ require (
 	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68
 	github.com/lucasb-eyer/go-colorful v1.4.0
 	github.com/pelletier/go-toml/v2 v2.4.3
-	golang.org/x/sync v0.21.0
+	golang.org/x/sync v0.22.0
 )
 
 require (
