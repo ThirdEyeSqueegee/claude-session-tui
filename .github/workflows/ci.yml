@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           # go.mod pins the version; setup-go installs exactly that. Single
           # source of truth — Dependabot bumps go.mod and CI follows.
@@ -79,7 +79,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           # The lint action manages its own cache; avoid double-caching.
